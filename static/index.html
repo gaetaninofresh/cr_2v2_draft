@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2v2 Draft</title>
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eceef3;--ink:#1a1d29;--mute:#6b7085;--card:#fff;--R:#d93a3a;--B:#2f6fe4;--line:#d5d8e2}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:500 15px/1.4 Rubik,system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+button,input{font:inherit}
+button{border:0;border-radius:8px;padding:.6em 1.1em;background:var(--ink);color:#fff;cursor:pointer}
+button:disabled{opacity:.35;cursor:default}
+button.R{background:var(--R)} button.B{background:var(--B)}
+button.ghost{background:transparent;color:var(--ink);border:1.5px solid var(--line)}
+input{padding:.6em .8em;border:1.5px solid var(--line);border-radius:8px;background:#fff;width:100%}
+#app{height:100%}
+.center{max-width:420px;margin:0 auto;padding:12vh 20px 20px;display:grid;gap:14px}
+.center h1{font-size:28px;margin:0 0 6px}
+.row{display:flex;gap:10px}
+.code{font-size:56px;font-weight:700;letter-spacing:.12em;margin:0}
+.teams{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.team{background:var(--card);border-radius:12px;padding:14px;border-top:6px solid;display:grid;gap:8px;align-content:start}
+.team.R{border-color:var(--R)} .team.B{border-color:var(--B)}
+.mute{color:var(--mute)}
+#toast{position:fixed;left:50%;top:14px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:.5em 1em;border-radius:8px;display:none;z-index:9}
+
+/* draft */
+.draft{height:100%;display:grid;grid-template-rows:auto 1fr auto}
+#bar{display:flex;align-items:center;gap:12px;padding:10px 14px 12px;background:var(--card);position:relative}
+#bar.R{--c:var(--R)} #bar.B{--c:var(--B)}
+#meter{position:absolute;left:0;bottom:0;height:5px;width:100%;background:var(--c);transform-origin:left;transition:transform .1s linear}
+#turn{flex:1;min-width:0}
+#turn b{color:var(--c)}
+#sec{font-size:26px;font-weight:700;min-width:2ch;text-align:right;color:var(--c)}
+#grid{overflow:auto;padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px;align-content:start}
+.card{position:relative;background:var(--card);padding:4px;border:2px solid transparent;border-radius:10px;color:var(--ink);text-align:center;font-size:11px;line-height:1.2}
+.card img{width:100%;display:block;aspect-ratio:3/4;object-fit:contain}
+.card.sel{border-color:var(--ink)}
+.card.taken{opacity:.3;pointer-events:none;border-color:var(--c)}
+.card.taken.R{--c:var(--R)} .card.taken.B{--c:var(--B)}
+#decks{background:var(--card);border-top:1px solid var(--line);padding:8px 12px;display:grid;gap:5px;max-height:34vh;overflow:auto}
+.deck{display:flex;align-items:center;gap:6px}
+.deck .n{width:84px;flex:none;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-left:4px solid var(--c);padding-left:6px}
+.deck.R{--c:var(--R)} .deck.B{--c:var(--B)}
+.deck.cur .n{font-weight:700}
+.slot{width:34px;height:42px;border-radius:5px;background:var(--bg);flex:none;overflow:hidden}
+.slot img{width:100%;height:100%;object-fit:contain;display:block}
+.done{max-width:760px;margin:0 auto;padding:24px 16px;display:grid;gap:14px}
+.done .deck{flex-wrap:wrap;background:var(--card);padding:10px;border-radius:10px;border-left:6px solid var(--c)}
+.done .slot{width:56px;height:70px}
+.done .head{width:100%;display:flex;gap:10px;align-items:center;justify-content:space-between}
+a.btn{background:var(--ink);color:#fff;padding:.5em 1em;border-radius:8px;text-decoration:none}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const rnd = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
+const pid = localStorage.pid || (localStorage.pid = rnd());
+const TEAM = {R: 'Red', B: 'Blue'};
+let ws, S = null, joinInfo = null, endsAt = 0, selected = null, view = '';
+
+function toast(t){ const e = $('#toast'); e.textContent = t; e.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => e.style.display = 'none', 2500); }
+const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+function connect(){
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => joinInfo && send({...joinInfo, pid});
+  ws.onclose = () => setTimeout(connect, 1000);
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'error'){ toast(m.msg); if (m.fatal){ S = null; joinInfo = null; render(); } return; }
+    S = m; joinInfo = {t: 'join', room: m.code, name: joinInfo ? joinInfo.name : 'Player'};
+    endsAt = Date.now() + m.remaining * 1000;
+    render();
+  };
+}
+
+function enter(t, room){
+  const name = $('#name').value.trim() || 'Player';
+  localStorage.name = name; joinInfo = {t, room, name};
+  send({...joinInfo, pid});
+}
+
+const player = id => S.players.find(p => p.id === id);
+const cardById = id => S.pool.find(c => c.id === id);
+
+function render(){
+  const a = $('#app'), v = S ? S.phase : 'home';
+  if (v !== view){ view = v; selected = null; a.innerHTML = ({home: homeHTML, lobby: () => '', draft: draftHTML, done: () => ''})[v](); if (v === 'home') bindHome(); if (v === 'draft') bindDraft(); }
+  ({home: () => {}, lobby: lobby, draft: draft, done: done})[v]();
+}
+
+/* home */
+const homeHTML = () => `<div class="center"><h1>2v2 Draft</h1>
+  <input id="name" maxlength="16" placeholder="Your name" value="${esc(localStorage.name || '')}">
+  <button id="create">Create room</button>
+  <div class="row"><input id="room" inputmode="numeric" maxlength="4" placeholder="Room code"><button id="join" class="ghost">Join</button></div></div>`;
+function bindHome(){
+  $('#create').onclick = () => enter('create');
+  $('#join').onclick = () => enter('join', $('#room').value.trim());
+}
+
+/* lobby */
+function lobby(){
+  const mine = player(pid), full = t => S.players.filter(p => p.team === t).length >= 2;
+  const col = t => `<div class="team ${t}"><b>${TEAM[t]}</b>
+    ${S.players.filter(p => p.team === t).map(p => `<div>${esc(p.name)}${p.id === pid ? ' (you)' : ''}</div>`).join('') || '<div class="mute">Empty</div>'}
+    <button class="${t}" data-team="${t}" ${full(t) || (mine && mine.team === t) ? 'disabled' : ''}>Join ${TEAM[t]}</button></div>`;
+  const loose = S.players.filter(p => !p.team);
+  const ready = ['R', 'B'].every(t => S.players.filter(p => p.team === t).length === 2);
+  $('#app').innerHTML = `<div class="center"><div class="mute">Room code</div><p class="code">${S.code}</p>
+    <div class="teams">${col('R')}${col('B')}</div>
+    ${loose.length ? `<div class="mute">Choosing a team: ${loose.map(p => esc(p.name)).join(', ')}</div>` : ''}
+    ${S.host === pid ? `<button id="start" ${ready ? '' : 'disabled'}>Start draft</button>` : '<div class="mute">Waiting for the host to start</div>'}</div>`;
+  document.querySelectorAll('[data-team]').forEach(b => b.onclick = () => send({t: 'team', team: b.dataset.team}));
+  const s = $('#start'); if (s) s.onclick = () => send({t: 'start'});
+}
+
+/* draft */
+const draftHTML = () => `<div class="draft"><div id="bar"><div id="turn"></div><button id="lock">Pick</button><div id="sec"></div><div id="meter"></div></div>
+  <div id="grid"></div><div id="decks"></div></div>`;
+function bindDraft(){
+  $('#grid').onclick = e => { const c = e.target.closest('.card'); if (c && S.order[S.idx] === pid){ selected = +c.dataset.id; draft(); } };
+  $('#lock').onclick = () => { if (selected){ send({t: 'pick', card: selected}); selected = null; } };
+}
+function deckRows(){
+  return S.players.slice().sort((a, b) => (a.team > b.team) - (a.team < b.team)).map(p => {
+    const ids = S.picks[p.id] || [];
+    const slots = Array.from({length: 8}, (_, i) => `<div class="slot">${ids[i] ? `<img src="${cardById(ids[i]).img}" alt="">` : ''}</div>`).join('');
+    return `<div class="deck ${p.team} ${S.phase === 'draft' && S.order[S.idx] === p.id ? 'cur' : ''}"><div class="n">${esc(p.name)}${p.id === pid ? ' (you)' : ''}</div>${slots}</div>`;
+  }).join('');
+}
+function draft(){
+  const cur = S.order[S.idx], p = player(cur), me = cur === pid;
+  let run = 0; while (S.order[S.idx + run] === cur) run++;
+  const nxt = S.order[S.idx + run], nn = nxt && player(nxt);
+  $('#bar').className = p.team;
+  $('#turn').innerHTML = `<b>${me ? 'Your pick' : esc(p.name) + ' is picking'}</b>${run > 1 ? ` (${run} cards)` : ''}
+    <div class="mute">Pick ${S.idx + 1} of ${S.order.length}${nn ? ' · next: ' + esc(nn.name) : ''}</div>`;
+  const g = $('#grid');
+  if (!g.children.length) g.innerHTML = S.pool.map(c => `<button class="card" data-id="${c.id}"><img src="${c.img}" alt="" loading="lazy"><span>${esc(c.name)}</span></button>`).join('');
+  if (selected && (S.pool.find(c => c.id === selected).by || !me)) selected = null;
+  [...g.children].forEach((el, i) => {
+    const c = S.pool[i], by = c.by && player(c.by);
+    el.className = 'card' + (by ? ' taken ' + by.team : '') + (c.id === selected ? ' sel' : '');
+  });
+  const l = $('#lock'); l.disabled = !(me && selected); l.className = p.team;
+  l.textContent = selected ? 'Pick ' + cardById(selected).name : 'Pick';
+  $('#decks').innerHTML = deckRows();
+}
+setInterval(() => {
+  if (!S || S.phase !== 'draft') return;
+  const left = Math.max(0, endsAt - Date.now());
+  $('#meter').style.transform = `scaleX(${left / (S.seconds * 1000)})`;
+  $('#sec').textContent = Math.ceil(left / 1000);
+}, 100);
+
+/* done */
+const link = ids => `https://link.clashroyale.com/en?clashroyale://copyDeck?deck=${ids.join(';')}&l=Royals`;
+function done(){
+  if ($('#app').dataset.done) return;
+  $('#app').dataset.done = 1;
+  const order = S.players.slice().sort((a, b) => (b.id === pid) - (a.id === pid) || (a.team > b.team) - (a.team < b.team));
+  $('#app').innerHTML = `<div class="done"><h2 style="margin:0">Draft complete</h2>` + order.map(p => {
+    const ids = S.picks[p.id];
+    return `<div class="deck ${p.team}"><div class="head"><b>${esc(p.name)}${p.id === pid ? ' (you)' : ''} · ${TEAM[p.team]}</b>
+      <span class="row"><a class="btn" href="${link(ids)}">Open in Clash Royale</a><button class="ghost" data-copy="${link(ids)}">Copy link</button></span></div>
+      ${ids.map(i => `<div class="slot"><img src="${cardById(i).img}" alt="${esc(cardById(i).name)}"></div>`).join('')}</div>`;
+  }).join('') + '</div>';
+  document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () =>
+    (navigator.clipboard ? navigator.clipboard.writeText(b.dataset.copy) : Promise.reject()).then(() => toast('Link copied'), () => prompt('Copy this link', b.dataset.copy)));
+}
+
+render(); connect();
+</script>
+</body>
+</html>
